@@ -373,14 +373,38 @@ async function loadMonitor() {
         boardCache[board.id] = { lists: lists, members: members, boardName: board.name };
 
         cards.forEach(function(c) {
-          if (!c.due) return;
           const list = lists.find(function(l){ return l.id === c.idList; });
           if (list && isSkipList(list.name)) return;
+
+          // Check checklist completion
+          var totalItems = 0, doneItems = 0, lastItemDue = null;
+          (c.checklists || []).forEach(function(cl) {
+            (cl.checkItems || []).forEach(function(item) {
+              totalItems++;
+              if (item.state === 'complete') doneItems++;
+              // Track last checklist item due date for cards without card-level due date
+              if (item.due) {
+                var d = new Date(item.due);
+                if (!lastItemDue || d > lastItemDue) lastItemDue = d;
+              }
+            });
+          });
+
+          // Skip if checklist 100% complete
+          if (totalItems > 0 && doneItems === totalItems) return;
+
+          // Skip if no due date AND no checklist items with due date
+          var effectiveDue = c.due || (lastItemDue ? lastItemDue.toISOString() : null);
+          if (!effectiveDue) return;
+
           window._cardMap[c.id] = Object.assign({}, c, {
             boardId: board.id,
             boardName: board.name,
             listName: list ? list.name : '—',
             memberObjs: c.idMembers.map(function(mid){ return members.find(function(m){ return m.id === mid; }); }).filter(Boolean),
+            due: effectiveDue,
+            checklistTotal: totalItems,
+            checklistDone: doneItems,
           });
         });
       } catch(err) {}
