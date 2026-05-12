@@ -605,12 +605,7 @@ async function sendComment(cardId) {
       : getOpenersUrgent();
 
     var closer = getCloser();
-    comment = mention + '
-' + opener + '
-' + milestoneLines.join('
-') + '
-
-' + closer;
+    comment = mention + '\n' + opener + '\n' + milestoneLines.join('\n') + '\n\n' + closer;
   } else if (daysLeft !== null && daysSince !== null && daysSince >= 2) {
     comment = mention + ' ' + getComment('stuck', null);
   } else if (daysLeft !== null && daysLeft < 0) {
