@@ -365,7 +365,7 @@ async function loadMonitor() {
       const board = allBoards[i];
       try {
         const results = await Promise.all([
-          trello('/boards/' + board.id + '/cards?filter=open&fields=id,name,due,dueComplete,idList,idMembers,labels,dateLastActivity'),
+          trello('/boards/' + board.id + '/cards?filter=open&fields=id,name,due,dueComplete,idList,idMembers,labels,dateLastActivity&checklists=all'),
           trello('/boards/' + board.id + '/lists?fields=id,name'),
           trello('/boards/' + board.id + '/members?fields=id,username,fullName'),
         ]);
@@ -483,11 +483,38 @@ function renderCard(card) {
   const ls = label && label.color ? 'background:' + getLabelColor(label.color) + '22;color:' + getLabelColor(label.color) + ';' : 'background:var(--surface2);color:var(--text2);';
   const stuck = card.daysSince >= 2 && !done ? '<div class="stuck-warn">⚠️ Tidak ada aktivitas ' + card.daysSince + ' hari</div>' : '';
 
+  // Checklist progress
+  var totalItems = 0, doneItems = 0, urgentMilestone = '';
+  var now2 = new Date();
+  (card.checklists || []).forEach(function(cl) {
+    (cl.checkItems || []).forEach(function(item) {
+      totalItems++;
+      if (item.state === 'complete') { doneItems++; return; }
+      if (!item.due) return;
+      var iDaysLeft = Math.ceil((new Date(item.due) - now2) / 86400000);
+      if (!urgentMilestone && iDaysLeft <= 1) {
+        urgentMilestone = '<div class="stuck-warn" style="color:var(--danger);">🎯 ' + item.name + (iDaysLeft < 0 ? ' (telat ' + Math.abs(iDaysLeft) + 'h)' : ' (besok!)') + '</div>';
+      } else if (!urgentMilestone && iDaysLeft <= 3) {
+        urgentMilestone = '<div class="stuck-warn" style="color:var(--warning);">🎯 ' + item.name + ' (H-' + iDaysLeft + ')</div>';
+      }
+    });
+  });
+  var checklistBar = totalItems > 0 ? (function() {
+    var pct = Math.round((doneItems / totalItems) * 100);
+    var barColor = pct === 100 ? 'var(--success)' : pct >= 50 ? 'var(--warning)' : 'var(--danger)';
+    return '<div style="display:flex;align-items:center;gap:6px;margin-bottom:8px;">'
+      + '<div style="flex:1;height:3px;background:var(--border);border-radius:99px;overflow:hidden;">'
+      + '<div style="width:' + pct + '%;height:100%;background:' + barColor + ';border-radius:99px;"></div></div>'
+      + '<span style="font-size:10px;color:var(--text3);white-space:nowrap;">' + doneItems + '/' + totalItems + '</span></div>';
+  })() : '';
+
   return '<div class="tcard">'
     + '<div class="tcard-top"><div class="tcard-title">' + card.name + '</div>'
     + (label && label.name ? '<span class="tcard-label" style="' + ls + '">' + label.name + '</span>' : '')
     + '</div>'
     + stuck
+    + urgentMilestone
+    + checklistBar
     + '<div class="tcard-list">' + card.listName + ' · ' + card.boardName + '</div>'
     + '<span class="dbadge ' + bc + '">' + bt + '</span>'
     + '<div class="tcard-actions">'
@@ -502,23 +529,73 @@ async function sendComment(cardId) {
   if (!card) return toast('Card tidak ditemukan, refresh dulu.', 'error');
 
   const now = new Date();
-  const due = new Date(card.due);
-  const daysLeft = Math.ceil((due - now) / 86400000);
+  const due = card.due ? new Date(card.due) : null;
+  const daysLeft = due ? Math.ceil((due - now) / 86400000) : null;
   const lastAct = card.dateLastActivity ? new Date(card.dateLastActivity) : null;
   const daysSince = lastAct ? Math.floor((now - lastAct) / 86400000) : null;
   const done = card.dueComplete;
 
-  let type;
-  if (done) type = 'done';
-  else if (daysLeft < 0) type = 'overdue';
-  else if (daysSince !== null && daysSince >= 2) type = 'stuck';
-  else if (daysLeft <= 1) type = 'h1';
-  else type = 'h3';
-
-  // Mention semua member di card (bukan board)
+  // Mention semua member di card
   const usernames = card.memberObjs ? card.memberObjs.map(function(m){ return m.username; }).filter(Boolean) : [];
   const mention = usernames.map(function(u){ return '@' + u; }).join(' ');
-  const comment = mention ? mention + ' ' + getComment(type, null) : getComment(type, null);
+
+  // Fetch checklist items untuk card ini
+  let urgentItems = [];
+  let overdueItems = [];
+  try {
+    const checklists = await trello('/cards/' + cardId + '/checklists');
+    checklists.forEach(function(cl) {
+      (cl.checkItems || []).forEach(function(item) {
+        if (item.state === 'complete') return; // skip done items
+        if (!item.due) return; // skip no due date
+        const itemDue = new Date(item.due);
+        const itemDaysLeft = Math.ceil((itemDue - now) / 86400000);
+        if (itemDaysLeft < 0) {
+          overdueItems.push({ name: item.name, daysLeft: itemDaysLeft });
+        } else if (itemDaysLeft <= 3) {
+          urgentItems.push({ name: item.name, daysLeft: itemDaysLeft });
+        }
+      });
+    });
+  } catch(e) {}
+
+  // Build comment based on checklist + card due date
+  let comment = '';
+  const hasChecklistContext = overdueItems.length > 0 || urgentItems.length > 0;
+
+  if (done) {
+    comment = mention + ' ' + getComment('done', null);
+  } else if (hasChecklistContext) {
+    // Build milestone-aware comment
+    let milestoneLines = [];
+    overdueItems.forEach(function(i) {
+      milestoneLines.push('- ' + i.name + ' → telat ' + Math.abs(i.daysLeft) + ' hari! ⚠️');
+    });
+    urgentItems.forEach(function(i) {
+      var label = i.daysLeft === 0 ? 'hari ini!' : i.daysLeft === 1 ? 'besok!' : i.daysLeft + ' hari lagi';
+      milestoneLines.push('- ' + i.name + ' → ' + label + ' ⏰');
+    });
+
+    var opener = overdueItems.length > 0
+      ? getOpenersOverdue()
+      : getOpenersUrgent();
+
+    var closer = getCloser();
+    comment = mention + '
+' + opener + '
+' + milestoneLines.join('
+') + '
+
+' + closer;
+  } else if (daysLeft !== null && daysSince !== null && daysSince >= 2) {
+    comment = mention + ' ' + getComment('stuck', null);
+  } else if (daysLeft !== null && daysLeft < 0) {
+    comment = mention + ' ' + getComment('overdue', null);
+  } else if (daysLeft !== null && daysLeft <= 1) {
+    comment = mention + ' ' + getComment('h1', null);
+  } else {
+    comment = mention + ' ' + getComment('h3', null);
+  }
 
   const confirmed = confirm('Kirim komentar ini?\n\n' + comment + '\n\nKlik OK untuk kirim.');
   if (!confirmed) return;
@@ -529,6 +606,33 @@ async function sendComment(cardId) {
   } catch(e) {
     toast('Gagal kirim: ' + e.message, 'error');
   }
+}
+
+// Opener variations for milestone-aware comments
+function getOpenersOverdue() {
+  var pool = [
+    'Ada milestone yang kelewat nih!',
+    'Beberapa bagian udah telat!',
+    'Milestone kelewat, ayo dikejar!',
+  ];
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+function getOpenersUrgent() {
+  var pool = [
+    'Deadline milestone deket nih!',
+    'Beberapa bagian mepet banget!',
+    'Milestone mau deadline, gaskeun!',
+  ];
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+function getCloser() {
+  var pool = [
+    'Ono kendala opo? Gaskeun biar timeline ga geser 🔥',
+    'Ada yang nyangkut? Langsung kabarin ya 🙏',
+    'Progress e piye? Kabarin kalau butuh bantuan 💪',
+    'Wes jalan kan? Gaskeun ojo sampe kelewat 💯',
+  ];
+  return pool[Math.floor(Math.random() * pool.length)];
 }
 
 // ---- PUSH BRIEF ----
