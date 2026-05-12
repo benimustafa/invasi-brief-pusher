@@ -515,8 +515,10 @@ async function sendComment(cardId) {
   else if (daysLeft <= 1) type = 'h1';
   else type = 'h3';
 
-  const username = card.memberObjs && card.memberObjs[0] ? card.memberObjs[0].username : null;
-  const comment = getComment(type, username);
+  // Mention semua member di card (bukan board)
+  const usernames = card.memberObjs ? card.memberObjs.map(function(m){ return m.username; }).filter(Boolean) : [];
+  const mention = usernames.map(function(u){ return '@' + u; }).join(' ');
+  const comment = mention ? mention + ' ' + getComment(type, null) : getComment(type, null);
 
   const confirmed = confirm('Kirim komentar ini?\n\n' + comment + '\n\nKlik OK untuk kirim.');
   if (!confirmed) return;
